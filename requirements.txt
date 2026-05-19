@@ -1,0 +1,10 @@
+gymnasium[mujoco]>=1.2,<1.4
+mujoco>=3.3
+torch
+numpy
+matplotlib
+pyyaml
+tqdm
+pytest
+imageio
+imageio-ffmpeg

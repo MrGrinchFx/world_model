@@ -1,0 +1,11 @@
+eval:
+  warmup_steps: 10
+  horizon: auto
+  max_horizon: 1000
+  report_horizons: [1, 5, 10, 90, 100, 200, 500, 1000]
+  vpt_thresholds: [0.10, 0.25, 0.50]
+  primary_metric: VPT80@0.25
+scoreboard:
+  primary: VPT80@0.25
+  secondary: nMSE@1000
+  tie_break: nMSE_AUC

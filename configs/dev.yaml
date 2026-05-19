@@ -1,0 +1,38 @@
+seed: 289
+
+env:
+  id: InvertedPendulum-v5
+
+dataset:
+  warmup_steps: 10
+  max_horizon: 100
+  lqr_gain: [-0.3, -15.0, -0.8, -1.5]
+  ar1_rho: 0.9
+
+splits:
+  train:
+    windows: 4096
+    reset_noise_scale: 0.01
+    action_noise_sigma: 0.15
+  val:
+    windows: 512
+    reset_noise_scale: 0.01
+    action_noise_sigma: 0.15
+  test:
+    windows: 512
+    reset_noise_scale: 0.01
+    action_noise_sigma: 0.15
+  ood:
+    windows: 512
+    reset_noise_scale: 0.03
+    action_noise_sigma: 0.25
+
+filter:
+  max_abs_true_angle: 0.20
+  max_attempts_multiplier: 80
+
+smoke:
+  train_windows: 128
+  val_windows: 32
+  test_windows: 32
+  ood_windows: 32
