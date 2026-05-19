@@ -17,7 +17,7 @@ class StudentWorldModel(nn.Module):
         act_dim: int = 1,
         hidden_dim: int = 128,
         num_layers: int = 2,
-        use_gru: bool = False,
+        use_gru: bool = True,
         delta_limit: float = 3.0,
     ):
         super().__init__()
