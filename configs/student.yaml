@@ -24,7 +24,7 @@ training:
 loss:
   one_step_weight: 0.75
   rollout_weight: 2.5
-  rollout_train_horizon: 40
+  rollout_train_horizon: 80
 
 eval:
   warmup_steps: 10
