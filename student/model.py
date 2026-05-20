@@ -30,7 +30,7 @@ class StudentWorldModel(nn.Module):
             in_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
         self.gru = nn.GRUCell(hidden_dim, hidden_dim) if self.use_gru else None
-        self.head = nn.Linear(hidden_dim, obs_dim)
+        self.head = nn.Linear(hidden_dim + obs_dim + act_dim, obs_dim)
 
     def initial_hidden(self, batch_size: int, device: torch.device):
         if not self.use_gru:
@@ -44,6 +44,10 @@ class StudentWorldModel(nn.Module):
                 hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
             hidden = self.gru(feat, hidden)
             feat = hidden
-        raw_delta = self.head(feat)
+            
+        # THE FIX: Concatenate the recurrent feature with the raw current state
+        head_input = torch.cat([feat, obs_norm, act_norm], dim=-1)
+        raw_delta = self.head(head_input)
+        
         delta = self.delta_limit * torch.tanh(raw_delta / self.delta_limit)
         return delta, hidden
