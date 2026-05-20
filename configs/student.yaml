@@ -12,8 +12,8 @@ training:
   updates: 8000
   smoke_updates: 120
   train_sequence_length: 100
-  learning_rate: 5.0e-4
-  grad_clip_norm: 3.0
+  learning_rate: 8.0e-5
+  grad_clip_norm: 2.5
   eval_every: 200
   smoke_eval_every: 20
   val_horizon: 200
@@ -22,7 +22,7 @@ training:
   checkpoint_mode: max
 
 loss:
-  one_step_weight: 0.75
+  one_step_weight: 0.2
   rollout_weight: 2.5
   rollout_train_horizon: 80
 
