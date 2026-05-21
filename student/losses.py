@@ -8,6 +8,7 @@ from .rollout import open_loop_rollout
 
 
 def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
+    # Extract structural tensor grid dimensions [Batch, Time, Features]
     B, T, obs_dim = states.shape
     
     obs_seq = states[:, :-1]
@@ -19,7 +20,7 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     target_norm_seq = normalizer.normalize_delta(target_delta_seq)
     
     if model.training:
-        # 1. Reflectional Parity Invariance Augmentation
+        # Reflectional Parity Invariance Augmentation
         obs_norm_mirror = -obs_norm_seq
         act_norm_mirror = -act_norm_seq
         target_norm_seq_mirror = -target_norm_seq
@@ -28,7 +29,7 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
         act_norm_seq = torch.cat([act_norm_seq, act_norm_mirror], dim=0)
         target_norm_seq = torch.cat([target_norm_seq, target_norm_seq_mirror], dim=0)
         
-        # 2. Adaptive Coarse-to-Fine Covariate Noise Injection
+        # Coarse-to-Fine Adaptive Covariate Noise Injection
         progress = getattr(model, "_step_counter", 0) / 10000.0
         dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
         obs_norm_seq = obs_norm_seq + torch.randn_like(obs_norm_seq) * dynamic_noise
@@ -39,20 +40,28 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     all_pred_norms = []
     all_logvars = []
     
-    # Initialize temporal context coordinate trackers
+    # Initialize sequential tracking pointers
     current_obs_norm = obs_norm_seq[:, 0]
     
-    # 3. Scheduled Autoregressive Context Sampling Pass
+    # Scheduled Autoregressive Context Sampling loop to eliminate context track drift
     for t in range(T - 1):
         if t > 0 and model.training and torch.rand(()).item() < 0.25:
-            # Reconstruct and step via the model's own step t-1 prediction
+            # Extract last multi-step normalized forecast increment
             pred_delta = all_pred_norms[-1]
-            unnorm_obs = normalizer.unnormalize_obs(current_obs_norm)
-            unnorm_delta = normalizer.unnormalize_delta(pred_delta)
+            
+            # Direct algebraic observation denormalization (resolves interface limitation)
+            obs_std = torch.as_tensor(normalizer.obs_std, dtype=current_obs_norm.dtype, device=current_obs_norm.device)
+            obs_mean = torch.as_tensor(normalizer.obs_mean, dtype=current_obs_norm.dtype, device=current_obs_norm.device)
+            unnorm_obs = current_obs_norm * obs_std + obs_mean
+            
+            # Official structural delta increment denormalization call
+            unnorm_delta = normalizer.denormalize_delta(pred_delta)
+            
+            # Advance spatial trajectory state vectors
             next_obs = unnorm_obs + unnorm_delta
             current_obs_norm = normalizer.normalize_obs(next_obs)
         else:
-            # Anchor back directly to the true physics trajectory manifold
+            # Retain baseline ground-truth anchoring tracks
             current_obs_norm = obs_norm_seq[:, t]
             
         pred_norm, hidden = model(current_obs_norm, act_norm_seq[:, t], hidden)
@@ -63,7 +72,7 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     target_norm_total = target_norm_seq.reshape(-1, obs_dim)
     logvar_total = torch.stack(all_logvars, dim=1).reshape(-1, obs_dim)
     
-    # 4. Adaptive Coordinate Channel Loss Weighting
+    # Adaptive Channel coordinate dimension weighting
     sq_error = (pred_norm_total - target_norm_total) ** 2
     with torch.no_grad():
         error_variance = torch.mean(sq_error, dim=0, keepdim=True)
@@ -128,12 +137,12 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
         for param_group in model._optimizer_ref.param_groups:
             param_group['lr'] = cosine_lr
 
-    # Dynamic BPTT horizon mapping over the available context width
+    # Dynamic BPTT curriculum unroll mapping over max available timeline contexts
     seq_len = int(training_cfg.get("train_sequence_length", 96))
     warmup = int(eval_cfg.get("warmup_steps", 10))
     base_horizon = int(loss_cfg.get("rollout_train_horizon", 15))
     
-    max_horizon = seq_len - warmup - 2  # Progresses smoothly up to 84 steps
+    max_horizon = seq_len - warmup - 2
     progress = current_step / total_updates
     current_horizon = int(base_horizon + math.floor(progress * (max_horizon - base_horizon)))
     
