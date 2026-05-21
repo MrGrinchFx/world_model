@@ -1,4 +1,4 @@
-"""Student world model - Lipschitz Continuous Probabilistic Edition."""
+"""Student world model - Stabilized Recurrent Architecture."""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ class LayerNormGRUCell(nn.Module):
         self.ln_input = nn.LayerNorm(3 * hidden_dim)
         self.ln_hidden = nn.LayerNorm(3 * hidden_dim)
         self.ln_candidate = nn.LayerNorm(hidden_dim)
+        
+        # Output norm stabilizes representation scale drift across long rollouts
+        self.ln_output = nn.LayerNorm(hidden_dim)
 
     def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         gates_x = self.ln_input(self.input_to_gates(x))
@@ -32,7 +35,7 @@ class LayerNormGRUCell(nn.Module):
         candidate = self.ln_candidate(candidate)
         
         next_h = (1.0 - update_gate) * h + update_gate * candidate
-        return next_h
+        return self.ln_output(next_h)
 
 
 class StudentWorldModel(nn.Module):
@@ -49,11 +52,9 @@ class StudentWorldModel(nn.Module):
         self.use_gru = bool(use_gru)
         self.delta_limit = float(delta_limit)
         
-        # MLP Encoder with Spectral Normalization to bound OOD sensitivity
         in_dim = obs_dim + act_dim
         layers: list[nn.Module] = []
         for _ in range(int(num_layers)):
-            # Wrapping layers in spectral_norm enforces smooth extrapolation
             layers += [
                 spectral_norm(nn.Linear(in_dim, hidden_dim)),
                 nn.LayerNorm(hidden_dim),
@@ -64,7 +65,6 @@ class StudentWorldModel(nn.Module):
         
         self.gru = LayerNormGRUCell(hidden_dim, hidden_dim) if self.use_gru else None
         
-        # Dual prediction heads
         head_in_dim = hidden_dim + obs_dim + act_dim
         self.mu_head = nn.Linear(head_in_dim, obs_dim)
         self.logvar_head = nn.Linear(head_in_dim, obs_dim)

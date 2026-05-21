@@ -1,4 +1,4 @@
-"""Student loss computation with Cosine Annealing and Covariate Injection."""
+"""Student loss computation with Cosine Annealing, Covariate Injection, and Curriculum Horizon."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from .rollout import open_loop_rollout
 
 
-def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> torch.Tensor:
+def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
     obs = states[:, :-1].reshape(-1, states.shape[-1])
     act = actions.reshape(-1, actions.shape[-1])
     target_delta = (states[:, 1:] - states[:, :-1]).reshape(-1, states.shape[-1])
@@ -16,18 +16,23 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     act_norm = normalizer.normalize_act(act)
     target_norm = normalizer.normalize_delta(target_delta)
     
-    # Inject subtle noise during training to teach the model to error-correct
+    # Covariate injection to simulate input drift during rollouts
     if model.training:
-        state_perturbation = torch.randn_like(obs_norm) * 0.015
-        obs_norm = obs_norm + state_perturbation
+        obs_norm = obs_norm + torch.randn_like(obs_norm) * 0.015
         
     pred_norm, _ = model(obs_norm, act_norm, None)
     
     logvar = model._current_logvar
     if logvar is None:
-        return F.mse_loss(pred_norm, target_norm)
+        return F.mse_loss(pred_norm, target_norm), torch.tensor(0.0, device=states.device)
         
-    return 0.5 * torch.mean(torch.exp(-logvar) * (pred_norm - target_norm) ** 2 + logvar)
+    # Standard Gaussian Negative Log-Likelihood loss
+    nll_loss = 0.5 * torch.mean(torch.exp(-logvar) * (pred_norm - target_norm) ** 2 + logvar)
+    
+    # Variance penalty prevents overconfidence-driven gradient shocks
+    var_penalty = 0.05 * torch.mean(logvar ** 2)
+    
+    return nll_loss, var_penalty
 
 
 def rollout_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer, warmup_steps: int, horizon: int) -> torch.Tensor:
@@ -54,7 +59,7 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
     import gc
     import math
 
-    # 1. Track persistent step execution metadata
+    # 1. Track persistent update steps across training iterations
     if not hasattr(model, "_step_counter"):
         model._step_counter = 0
     if not hasattr(model, "_optimizer_ref"):
@@ -66,12 +71,16 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
 
     model._step_counter += 1
     
-    # 2. Compute dynamic Cosine Annealing Learning Rate safely (handles minimal test configs)
+    # 2. Extract configuration metadata with test-safe fallbacks
     training_cfg = cfg.get("training", {})
+    loss_cfg = cfg.get("loss", {})
+    eval_cfg = cfg.get("eval", {})
+    
     initial_lr = float(training_cfg.get("learning_rate", 1.0e-4))
-    total_updates = int(training_cfg.get("updates", 5000))
+    total_updates = int(training_cfg.get("updates", 10000))
     min_lr = 1.0e-6
     
+    # 3. Dynamic Cosine Annealing Scheduler Execution
     current_step = min(model._step_counter, total_updates)
     cosine_lr = min_lr + 0.5 * (initial_lr - min_lr) * (
         1.0 + math.cos(math.pi * current_step / total_updates)
@@ -81,21 +90,25 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
         for param_group in model._optimizer_ref.param_groups:
             param_group['lr'] = cosine_lr
 
-    # 3. Aggregate Objective Losses
-    loss_cfg = cfg["loss"]
+    # 4. Progressive Autoregressive Curriculum Horizon Selection
+    base_horizon = int(loss_cfg.get("rollout_train_horizon", 15))
+    max_horizon = base_horizon + 15  # Scaled up to 45 over the course of training
+    progress = current_step / total_updates
+    current_horizon = int(base_horizon + math.floor(progress * (max_horizon - base_horizon)))
+    
+    # 5. Core Loss Aggregation
     states = batch["states"]
     actions = batch["actions"]
     
-    one = one_step_delta_loss(model, states, actions, normalizer)
+    one_step_nll, var_penalty = one_step_delta_loss(model, states, actions, normalizer)
     
-    horizon = int(loss_cfg.get("rollout_train_horizon", 15))
-    warmup = int(cfg["eval"].get("warmup_steps", 10))
-    roll = rollout_loss(model, states, actions, normalizer, warmup_steps=warmup, horizon=horizon)
+    warmup = int(eval_cfg.get("warmup_steps", 10))
+    roll = rollout_loss(model, states, actions, normalizer, warmup_steps=warmup, horizon=current_horizon)
     
-    total = float(loss_cfg.get("one_step_weight", 1.0)) * one + float(loss_cfg.get("rollout_weight", 1.0)) * roll
+    total = float(loss_cfg.get("one_step_weight", 1.0)) * (one_step_nll + var_penalty) + float(loss_cfg.get("rollout_weight", 1.0)) * roll
     
     return total, {
         "loss/total": float(total.detach().cpu()),
-        "loss/one_step": float(one.detach().cpu()),
+        "loss/one_step": float(one_step_nll.detach().cpu()),
         "loss/rollout": float(roll.detach().cpu()),
     }
