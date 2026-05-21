@@ -17,8 +17,6 @@ class LayerNormGRUCell(nn.Module):
         self.ln_input = nn.LayerNorm(3 * hidden_dim)
         self.ln_hidden = nn.LayerNorm(3 * hidden_dim)
         self.ln_candidate = nn.LayerNorm(hidden_dim)
-        
-        # Output norm stabilizes representation scale drift across long rollouts
         self.ln_output = nn.LayerNorm(hidden_dim)
 
     def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
@@ -52,17 +50,15 @@ class StudentWorldModel(nn.Module):
         self.use_gru = bool(use_gru)
         self.delta_limit = float(delta_limit)
         
-# Inside student/model.py -> StudentWorldModel.__init__
         in_dim = obs_dim + act_dim
         layers: list[nn.Module] = []
         for i in range(int(num_layers)):
             if i == 0:
-                # Keep the input layer unconstrained to fully capture wide action shocks
+                # Unconstrained input layer allows the model to register wide OOD shocks cleanly
                 layers += [nn.Linear(in_dim, hidden_dim)]
             else:
-                # Constrain deep transitions to ensure long-horizon smoothness
+                # Spectrally bounded deep hidden transitions ensure long-horizon continuity
                 layers += [spectral_norm(nn.Linear(in_dim, hidden_dim))]
-                
             layers += [nn.LayerNorm(hidden_dim), nn.SiLU()]
             in_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
