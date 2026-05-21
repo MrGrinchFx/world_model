@@ -48,9 +48,15 @@ class StudentWorldModel(nn.Module):
         
         in_dim = obs_dim + act_dim
         layers: list[nn.Module] = []
-        for _ in range(int(num_layers)):
-            layers += [nn.Linear(in_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.SiLU()]
-            in_dim = hidden_dim
+# Inside your StudentWorldModel.__init__ loop:
+        for i in range(int(num_layers)):
+            layers += [
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.SiLU(),
+                nn.Dropout(0.1)  # Stochastically drops out 10% of features during training
+            ]
+    in_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
         
         self.gru = LayerNormGRUCell(hidden_dim, hidden_dim) if self.use_gru else None
