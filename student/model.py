@@ -44,7 +44,7 @@ class StudentWorldModel(nn.Module):
         hidden_dim: int = 256,
         num_layers: int = 3,
         use_gru: bool = True,
-        delta_limit: float = 3.0,
+        delta_limit: float = 8.0,  # Expanded to 8.0 to eliminate tracking saturation limits
     ):
         super().__init__()
         self.use_gru = bool(use_gru)
@@ -94,7 +94,6 @@ class StudentWorldModel(nn.Module):
         raw_mu = baseline_delta + 0.1 * self.mu_head(head_input)
         delta = self.delta_limit * torch.tanh(raw_mu / self.delta_limit)
         
-        # Smooth softplus parameterization prevents non-differentiable hard boundary clipping
         raw_logvar = self.logvar_head(head_input)
         logvar = 2.0 - torch.nn.functional.softplus(2.0 - raw_logvar)
         logvar = torch.clamp(logvar, min=-9.0)

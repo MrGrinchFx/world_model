@@ -1,4 +1,4 @@
-"""Student loss computation with Parity Symmetry and Adaptive Coordinate Weighting."""
+"""Student loss computation with Sequential State Forwarding and Parity Symmetry."""
 
 from __future__ import annotations
 
@@ -8,44 +8,57 @@ from .rollout import open_loop_rollout
 
 
 def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
-    obs = states[:, :-1].reshape(-1, states.shape[-1])
-    act = actions.reshape(-1, actions.shape[-1])
-    target_delta = (states[:, 1:] - states[:, :-1]).reshape(-1, states.shape[-1])
+    # Unpack sequence context dimensions safely [Batch, Time, Dimension]
+    B, T, obs_dim = states.shape
     
-    obs_norm = normalizer.normalize_obs(obs)
-    act_norm = normalizer.normalize_act(act)
-    target_norm = normalizer.normalize_delta(target_delta)
+    obs_seq = states[:, :-1]
+    act_seq = actions
+    target_delta_seq = states[:, 1:] - states[:, :-1]
+    
+    obs_norm_seq = normalizer.normalize_obs(obs_seq)
+    act_norm_seq = normalizer.normalize_act(act_seq)
+    target_norm_seq = normalizer.normalize_delta(target_delta_seq)
     
     if model.training:
         # Reflectional Parity Invariance Augmentation
-        obs_norm_mirror = -obs_norm
-        act_norm_mirror = -act_norm
-        target_norm_mirror = -target_norm
+        obs_norm_mirror = -obs_norm_seq
+        act_norm_mirror = -act_norm_seq
+        target_norm_seq_mirror = -target_norm_seq
         
-        obs_norm = torch.cat([obs_norm, obs_norm_mirror], dim=0)
-        act_norm = torch.cat([act_norm, act_norm_mirror], dim=0)
-        target_norm = torch.cat([target_norm, target_norm_mirror], dim=0)
+        obs_norm_seq = torch.cat([obs_norm_seq, obs_norm_mirror], dim=0)
+        act_norm_seq = torch.cat([act_norm_seq, act_norm_mirror], dim=0)
+        target_norm_seq = torch.cat([target_norm_seq, target_norm_seq_mirror], dim=0)
         
-        # Coarse-to-Fine Adaptive Covariate Noise Injection
+        # Adaptive Coarse-to-Fine Covariate Noise Injection
         progress = getattr(model, "_step_counter", 0) / 10000.0
         dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
-        obs_norm = obs_norm + torch.randn_like(obs_norm) * dynamic_noise
+        obs_norm_seq = obs_norm_seq + torch.randn_like(obs_norm_seq) * dynamic_noise
         
-    pred_norm, _ = model(obs_norm, act_norm, None)
+    current_B = obs_norm_seq.shape[0]
+    hidden = model.initial_hidden(current_B, states.device)
     
-    logvar = model._current_logvar
-    if logvar is None:
-        return F.mse_loss(pred_norm, target_norm), torch.tensor(0.0, device=states.device)
+    all_pred_norms = []
+    all_logvars = []
+    
+    # ADVANCED FIX: Process sequentially to preserve GRU hidden state context tracks over time!
+    for t in range(T - 1):
+        pred_norm, hidden = model(obs_norm_seq[:, t], act_norm_seq[:, t], hidden)
+        all_pred_norms.append(pred_norm)
+        all_logvars.append(model._current_logvar)
         
-    # Adaptive dimension weights: prioritize unstable angular tracking channels
-    sq_error = (pred_norm - target_norm) ** 2
+    pred_norm_total = torch.stack(all_pred_norms, dim=1).reshape(-1, obs_dim)
+    target_norm_total = target_norm_seq.reshape(-1, obs_dim)
+    logvar_total = torch.stack(all_logvars, dim=1).reshape(-1, obs_dim)
+    
+    # Adaptive channel coordinate dimension loss weighting
+    sq_error = (pred_norm_total - target_norm_total) ** 2
     with torch.no_grad():
         error_variance = torch.mean(sq_error, dim=0, keepdim=True)
         dim_weights = error_variance / (torch.sum(error_variance) + 1e-6)
-        dim_weights = torch.clamp(dim_weights * states.shape[-1], min=0.5, max=2.5)
+        dim_weights = torch.clamp(dim_weights * obs_dim, min=0.5, max=2.5)
         
-    nll_loss = 0.5 * torch.mean(dim_weights * (torch.exp(-logvar) * sq_error + logvar))
-    var_penalty = 0.05 * torch.mean(logvar ** 2)
+    nll_loss = 0.5 * torch.mean(dim_weights * (torch.exp(-logvar_total) * sq_error + logvar_total))
+    var_penalty = 0.05 * torch.mean(logvar_total ** 2)
     
     return nll_loss, var_penalty
 
@@ -102,13 +115,12 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
         for param_group in model._optimizer_ref.param_groups:
             param_group['lr'] = cosine_lr
 
-    # Dynamic Curriculum fully bound to maximum sequence lengths
+    # Max out the unroll curriculum loop context window completely
     seq_len = int(training_cfg.get("train_sequence_length", 96))
     warmup = int(eval_cfg.get("warmup_steps", 10))
     base_horizon = int(loss_cfg.get("rollout_train_horizon", 15))
     
-    # Max out the unroll curriculum to fully utilize the context width
-    max_horizon = seq_len - warmup - 2  # Progresses smoothly up to 84 steps
+    max_horizon = seq_len - warmup - 2  # Smooth progressive extension up to 84 steps
     progress = current_step / total_updates
     current_horizon = int(base_horizon + math.floor(progress * (max_horizon - base_horizon)))
     
