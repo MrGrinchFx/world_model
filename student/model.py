@@ -1,4 +1,4 @@
-"""Student world model - Stabilized Recurrent Architecture."""
+"""Student world model - High-Fidelity Recurrent Architecture."""
 
 from __future__ import annotations
 
@@ -54,10 +54,10 @@ class StudentWorldModel(nn.Module):
         layers: list[nn.Module] = []
         for i in range(int(num_layers)):
             if i == 0:
-                # Unconstrained input layer allows the model to register wide OOD shocks cleanly
+                # Unconstrained input layer fully registers sudden, wide OOD shocks
                 layers += [nn.Linear(in_dim, hidden_dim)]
             else:
-                # Spectrally bounded deep hidden transitions ensure long-horizon continuity
+                # Spectrally normalized deep transitions maintain contraction mapping properties
                 layers += [spectral_norm(nn.Linear(in_dim, hidden_dim))]
             layers += [nn.LayerNorm(hidden_dim), nn.SiLU()]
             in_dim = hidden_dim
@@ -94,7 +94,10 @@ class StudentWorldModel(nn.Module):
         raw_mu = baseline_delta + 0.1 * self.mu_head(head_input)
         delta = self.delta_limit * torch.tanh(raw_mu / self.delta_limit)
         
-        logvar = torch.clamp(self.logvar_head(head_input), min=-10.0, max=2.0)
+        # Smooth softplus parameterization prevents non-differentiable hard boundary clipping
+        raw_logvar = self.logvar_head(head_input)
+        logvar = 2.0 - torch.nn.functional.softplus(2.0 - raw_logvar)
+        logvar = torch.clamp(logvar, min=-9.0)
         self._current_logvar = logvar
         
         return delta, hidden
