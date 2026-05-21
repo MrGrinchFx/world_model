@@ -52,14 +52,18 @@ class StudentWorldModel(nn.Module):
         self.use_gru = bool(use_gru)
         self.delta_limit = float(delta_limit)
         
+# Inside student/model.py -> StudentWorldModel.__init__
         in_dim = obs_dim + act_dim
         layers: list[nn.Module] = []
-        for _ in range(int(num_layers)):
-            layers += [
-                spectral_norm(nn.Linear(in_dim, hidden_dim)),
-                nn.LayerNorm(hidden_dim),
-                nn.SiLU()
-            ]
+        for i in range(int(num_layers)):
+            if i == 0:
+                # Keep the input layer unconstrained to fully capture wide action shocks
+                layers += [nn.Linear(in_dim, hidden_dim)]
+            else:
+                # Constrain deep transitions to ensure long-horizon smoothness
+                layers += [spectral_norm(nn.Linear(in_dim, hidden_dim))]
+                
+            layers += [nn.LayerNorm(hidden_dim), nn.SiLU()]
             in_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
         

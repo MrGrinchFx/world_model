@@ -18,7 +18,9 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     
     # Covariate injection to simulate input drift during rollouts
     if model.training:
-        obs_norm = obs_norm + torch.randn_like(obs_norm) * 0.015
+        progress = getattr(model, "_step_counter", 0) / 10000.0
+        dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
+        obs_norm = obs_norm + torch.randn_like(obs_norm) * dynamic_noise
         
     pred_norm, _ = model(obs_norm, act_norm, None)
     
