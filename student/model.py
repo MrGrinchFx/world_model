@@ -76,26 +76,32 @@ class StudentWorldModel(nn.Module):
         return torch.zeros(batch_size, self.gru.hidden_size, device=device)
 
     def forward(self, obs_norm: torch.Tensor, act_norm: torch.Tensor, hidden=None):
+        # 1. Combine observation (4) and action (1) -> Dimension: [B, 5]
         raw_input = torch.cat([obs_norm, act_norm], dim=-1)
+        
+        # 2. Structural linear baseline -> Dimension: [B, 4]
         baseline_delta = self.kinematic_shortcut(raw_input)
         
+        # 3. Pass the 5D raw_input to the encoder -> Dimension: [B, 256]
         feat = self.encoder(raw_input)
+        
+        # 4. Recurrent transition processing
         if self.gru is not None:
             if hidden is None:
                 hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
             assert hidden is not None
             hidden = self.gru(feat, hidden)
-            feat = hidden
+            feat = hidden  # Keeps dimension at [B, 256]
             
+        # 5. Direct Input Conditioning for the heads -> Dimension: [B, 256 + 4 + 1] = [B, 261]
         head_input = torch.cat([feat, obs_norm, act_norm], dim=-1)
         
-        # Compute mean prediction
+        # 6. Compute mean prediction
         raw_mu = baseline_delta + 0.1 * self.mu_head(head_input)
         delta = self.delta_limit * torch.tanh(raw_mu / self.delta_limit)
         
-        # Compute log-variance and cache it internally for the loss function
+        # 7. Compute log-variance and cache it internally
         logvar = torch.clamp(self.logvar_head(head_input), min=-10.0, max=2.0)
         self._current_logvar = logvar
         
-        # Return only delta and hidden to keep external scripts completely functional!
         return delta, hidden
