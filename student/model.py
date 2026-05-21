@@ -56,7 +56,7 @@ class StudentWorldModel(nn.Module):
                 nn.SiLU(),
                 nn.Dropout(0.1)  # Stochastically drops out 10% of features during training
             ]
-    in_dim = hidden_dim
+        in_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
         
         self.gru = LayerNormGRUCell(hidden_dim, hidden_dim) if self.use_gru else None
