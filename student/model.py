@@ -59,7 +59,12 @@ class StudentWorldModel(nn.Module):
             in_dim = hidden_dim
         self.encoder = nn.Sequential(*layers)
         self.gru = LayerNormGRUCell(hidden_dim, hidden_dim) if self.use_gru else None
+        
+        # Keep your exact head dimension
         self.head = nn.Linear(hidden_dim + obs_dim + act_dim, obs_dim)
+        
+        # NEW: Direct kinematic baseline shortcut mapping (Input Space -> State Space)
+        self.kinematic_shortcut = nn.Linear(obs_dim + act_dim, obs_dim)
 
     def initial_hidden(self, batch_size: int, device: torch.device):
         if not self.use_gru:
@@ -67,16 +72,25 @@ class StudentWorldModel(nn.Module):
         return torch.zeros(batch_size, self.gru.hidden_size, device=device)
 
     def forward(self, obs_norm: torch.Tensor, act_norm: torch.Tensor, hidden=None):
-        feat = self.encoder(torch.cat([obs_norm, act_norm], dim=-1))
+        raw_input = torch.cat([obs_norm, act_norm], dim=-1)
+        
+        # 1. Compute the structural linear shortcut baseline
+        baseline_delta = self.kinematic_shortcut(raw_input)
+        
+        # 2. Forward pass through your encoder + LayerNorm GRU
+        feat = self.encoder(raw_input)
         if self.gru is not None:
             if hidden is None:
                 hidden = self.initial_hidden(obs_norm.shape[0], obs_norm.device)
+            assert hidden is not None # Prevents TorchScript Optional[Tensor] typing warnings
             hidden = self.gru(feat, hidden)
             feat = hidden
             
-        # THE FIX: Concatenate the recurrent feature with the raw current state
+        # 3. Concatenate for input conditioning
         head_input = torch.cat([feat, obs_norm, act_norm], dim=-1)
-        raw_delta = self.head(head_input)
+        
+        # 4. Combine the linear baseline with the non-linear recurrent error prediction
+        raw_delta = baseline_delta + 0.1 * self.head(head_input)
         
         delta = self.delta_limit * torch.tanh(raw_delta / self.delta_limit)
         return delta, hidden
