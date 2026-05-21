@@ -12,6 +12,8 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     target_delta = (states[:, 1:] - states[:, :-1]).reshape(-1, states.shape[-1])
     
     obs_norm = normalizer.normalize_obs(obs)
+    if model.training:
+        obs_norm = obs_norm + torch.randn_like(obs_norm) * 0.02
     act_norm = normalizer.normalize_act(act)
     target_norm = normalizer.normalize_delta(target_delta)
     
