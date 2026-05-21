@@ -12,7 +12,7 @@ training:
   updates: 15000
   smoke_updates: 120
   train_sequence_length: 100
-  learning_rate: 8.0e-5
+  learning_rate: 4.0e-5
   grad_clip_norm: 2.5
   eval_every: 200
   smoke_eval_every: 20
