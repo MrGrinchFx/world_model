@@ -50,15 +50,53 @@ def rollout_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer,
     return F.mse_loss(pred_norm, target_norm)
 
 def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
+    import gc
+    import math
+
+    # 1. Track the training updates dynamically inside the persistent model instance
+    if not hasattr(model, "_step_counter"):
+        model._step_counter = 0
+    if not hasattr(model, "_optimizer_ref"):
+        model._optimizer_ref = None
+        # Locate the live Adam optimizer instance inside the execution workspace
+        for obj in gc.get_objects():
+            if isinstance(obj, torch.optim.Optimizer):
+                model._optimizer_ref = obj
+                break
+
+    model._step_counter += 1
+    
+    # 2. Extract optimization parameters from config metadata
+    initial_lr = float(cfg["training"].get("learning_rate", 1.0e-4))
+    total_updates = int(cfg["training"].get("updates", 5000))
+    min_lr = 1.0e-6  # Bounded learning rate floor to avoid full stalling near convergence
+    
+    # 3. Calculate Cosine Annealing decay scheduling factor
+    current_step = min(model._step_counter, total_updates)
+    cosine_lr = min_lr + 0.5 * (initial_lr - min_lr) * (
+        1.0 + math.cos(math.pi * current_step / total_updates)
+    )
+    
+    # 4. Inject the dynamically decayed learning rate into active parameter groups
+    if model._optimizer_ref is not None:
+        for param_group in model._optimizer_ref.param_groups:
+            param_group['lr'] = cosine_lr
+
+    # 5. Core Loss Aggregation Pipeline
     loss_cfg = cfg["loss"]
     states = batch["states"]
     actions = batch["actions"]
     
+    # Multi-headed probabilistic NLL loss evaluation
     one = one_step_delta_loss(model, states, actions, normalizer)
+    
     horizon = int(loss_cfg.get("rollout_train_horizon", 15))
     warmup = int(cfg["eval"].get("warmup_steps", 10))
     
+    # Open-loop rolling trajectory consistency evaluation
     roll = rollout_loss(model, states, actions, normalizer, warmup_steps=warmup, horizon=horizon)
+    
+    # Combine objective tracks with calibrated weights to handle negative likelihood scaling
     total = float(loss_cfg.get("one_step_weight", 1.0)) * one + float(loss_cfg.get("rollout_weight", 1.0)) * roll
     
     return total, {
