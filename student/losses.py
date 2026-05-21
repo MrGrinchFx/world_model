@@ -66,9 +66,10 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
 
     model._step_counter += 1
     
-    # 2. Compute dynamic Cosine Annealing Learning Rate
-    initial_lr = float(cfg["training"].get("learning_rate", 1.0e-4))
-    total_updates = int(cfg["training"].get("updates", 5000))
+    # 2. Compute dynamic Cosine Annealing Learning Rate safely (handles minimal test configs)
+    training_cfg = cfg.get("training", {})
+    initial_lr = float(training_cfg.get("learning_rate", 1.0e-4))
+    total_updates = int(training_cfg.get("updates", 5000))
     min_lr = 1.0e-6
     
     current_step = min(model._step_counter, total_updates)
