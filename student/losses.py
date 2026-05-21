@@ -1,4 +1,4 @@
-"""Student loss computation with Sequential State Forwarding and Parity Symmetry."""
+"""Student loss computation with Scheduled Context Sampling and Parity Symmetry."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from .rollout import open_loop_rollout
 
 
 def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
-    # Unpack sequence context dimensions safely [Batch, Time, Dimension]
     B, T, obs_dim = states.shape
     
     obs_seq = states[:, :-1]
@@ -20,7 +19,7 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     target_norm_seq = normalizer.normalize_delta(target_delta_seq)
     
     if model.training:
-        # Reflectional Parity Invariance Augmentation
+        # 1. Reflectional Parity Invariance Augmentation
         obs_norm_mirror = -obs_norm_seq
         act_norm_mirror = -act_norm_seq
         target_norm_seq_mirror = -target_norm_seq
@@ -29,7 +28,7 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
         act_norm_seq = torch.cat([act_norm_seq, act_norm_mirror], dim=0)
         target_norm_seq = torch.cat([target_norm_seq, target_norm_seq_mirror], dim=0)
         
-        # Adaptive Coarse-to-Fine Covariate Noise Injection
+        # 2. Adaptive Coarse-to-Fine Covariate Noise Injection
         progress = getattr(model, "_step_counter", 0) / 10000.0
         dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
         obs_norm_seq = obs_norm_seq + torch.randn_like(obs_norm_seq) * dynamic_noise
@@ -40,9 +39,23 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     all_pred_norms = []
     all_logvars = []
     
-    # ADVANCED FIX: Process sequentially to preserve GRU hidden state context tracks over time!
+    # Initialize temporal context coordinate trackers
+    current_obs_norm = obs_norm_seq[:, 0]
+    
+    # 3. Scheduled Autoregressive Context Sampling Pass
     for t in range(T - 1):
-        pred_norm, hidden = model(obs_norm_seq[:, t], act_norm_seq[:, t], hidden)
+        if t > 0 and model.training and torch.rand(()).item() < 0.25:
+            # Reconstruct and step via the model's own step t-1 prediction
+            pred_delta = all_pred_norms[-1]
+            unnorm_obs = normalizer.unnormalize_obs(current_obs_norm)
+            unnorm_delta = normalizer.unnormalize_delta(pred_delta)
+            next_obs = unnorm_obs + unnorm_delta
+            current_obs_norm = normalizer.normalize_obs(next_obs)
+        else:
+            # Anchor back directly to the true physics trajectory manifold
+            current_obs_norm = obs_norm_seq[:, t]
+            
+        pred_norm, hidden = model(current_obs_norm, act_norm_seq[:, t], hidden)
         all_pred_norms.append(pred_norm)
         all_logvars.append(model._current_logvar)
         
@@ -50,7 +63,7 @@ def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, norm
     target_norm_total = target_norm_seq.reshape(-1, obs_dim)
     logvar_total = torch.stack(all_logvars, dim=1).reshape(-1, obs_dim)
     
-    # Adaptive channel coordinate dimension loss weighting
+    # 4. Adaptive Coordinate Channel Loss Weighting
     sq_error = (pred_norm_total - target_norm_total) ** 2
     with torch.no_grad():
         error_variance = torch.mean(sq_error, dim=0, keepdim=True)
@@ -115,12 +128,12 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
         for param_group in model._optimizer_ref.param_groups:
             param_group['lr'] = cosine_lr
 
-    # Max out the unroll curriculum loop context window completely
+    # Dynamic BPTT horizon mapping over the available context width
     seq_len = int(training_cfg.get("train_sequence_length", 96))
     warmup = int(eval_cfg.get("warmup_steps", 10))
     base_horizon = int(loss_cfg.get("rollout_train_horizon", 15))
     
-    max_horizon = seq_len - warmup - 2  # Smooth progressive extension up to 84 steps
+    max_horizon = seq_len - warmup - 2  # Progresses smoothly up to 84 steps
     progress = current_step / total_updates
     current_horizon = int(base_horizon + math.floor(progress * (max_horizon - base_horizon)))
     

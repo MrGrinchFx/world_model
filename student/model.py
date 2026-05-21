@@ -44,7 +44,7 @@ class StudentWorldModel(nn.Module):
         hidden_dim: int = 256,
         num_layers: int = 3,
         use_gru: bool = True,
-        delta_limit: float = 8.0,  # Expanded to 8.0 to eliminate tracking saturation limits
+        delta_limit: float = 8.0,  # Retains maximum precision headroom for clean predictions
     ):
         super().__init__()
         self.use_gru = bool(use_gru)
@@ -54,10 +54,10 @@ class StudentWorldModel(nn.Module):
         layers: list[nn.Module] = []
         for i in range(int(num_layers)):
             if i == 0:
-                # Unconstrained input layer fully registers sudden, wide OOD shocks
+                # Unconstrained input layer fully registers sudden state-action variations
                 layers += [nn.Linear(in_dim, hidden_dim)]
             else:
-                # Spectrally normalized deep transitions maintain contraction mapping properties
+                # Spectrally normalized hidden layers enforce smooth continuous extrapolation
                 layers += [spectral_norm(nn.Linear(in_dim, hidden_dim))]
             layers += [nn.LayerNorm(hidden_dim), nn.SiLU()]
             in_dim = hidden_dim
@@ -91,7 +91,14 @@ class StudentWorldModel(nn.Module):
             
         head_input = torch.cat([feat, obs_norm, act_norm], dim=-1)
         
-        raw_mu = baseline_delta + 0.1 * self.mu_head(head_input)
+        # Extract raw non-linear updates
+        non_linear_residual = self.mu_head(head_input)
+        
+        # Elastic Residual Gate: clips anomalous updates under extreme OOD inputs,
+        # forcing safe reliance on the kinematic baseline shortcut.
+        non_linear_residual = torch.tanh(non_linear_residual / 4.0) * 4.0
+        
+        raw_mu = baseline_delta + 0.1 * non_linear_residual
         delta = self.delta_limit * torch.tanh(raw_mu / self.delta_limit)
         
         raw_logvar = self.logvar_head(head_input)
