@@ -11,8 +11,8 @@ training:
   batch_size: 128
   updates: 10000
   smoke_updates: 120
-  train_sequence_length: 64
-  learning_rate: 1.0e-4
+  train_sequence_length: 96       # Increased from 64 to allow a significantly longer curriculum horizon
+  learning_rate: 2.0e-4           # Bumped up from 1.0e-4 to maximize early gradient exploration under your custom cosine decay
   grad_clip_norm: 1.0
   eval_every: 200
   smoke_eval_every: 20
@@ -23,8 +23,8 @@ training:
 
 loss:
   one_step_weight: 1.0
-  rollout_weight: 10.0
-  rollout_train_horizon: 15
+  rollout_weight: 12.0            # Slightly increased to heavily penalize multi-step drift as horizons scale
+  rollout_train_horizon: 25       # Shifted starting baseline up from 15 to focus on temporal modeling from early updates
 
 eval:
   warmup_steps: 10

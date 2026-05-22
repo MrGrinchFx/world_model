@@ -8,40 +8,56 @@ from .rollout import open_loop_rollout
 
 
 def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
-    obs = states[:, :-1].reshape(-1, states.shape[-1])
-    act = actions.reshape(-1, actions.shape[-1])
-    target_delta = (states[:, 1:] - states[:, :-1]).reshape(-1, states.shape[-1])
+    B, T, _ = actions.shape
+    hidden = model.initial_hidden(B, states.device)
     
-    obs_norm = normalizer.normalize_obs(obs)
-    act_norm = normalizer.normalize_act(act)
-    target_norm = normalizer.normalize_delta(target_delta)
+    total_nll = 0.0
+    total_var_penalty = 0.0
     
-    if model.training:
-        # Reflectional Parity Invariance Augmentation
-        obs_norm_mirror = -obs_norm
-        act_norm_mirror = -act_norm
-        target_norm_mirror = -target_norm
+    # Process sequentially to let the GRU hidden state learn real temporal trackings
+    for t in range(T):
+        obs = states[:, t]
+        act = actions[:, t]
+        target_delta = states[:, t+1] - states[:, t]
         
-        obs_norm = torch.cat([obs_norm, obs_norm_mirror], dim=0)
-        act_norm = torch.cat([act_norm, act_norm_mirror], dim=0)
-        target_norm = torch.cat([target_norm, target_norm_mirror], dim=0)
+        obs_norm = normalizer.normalize_obs(obs)
+        act_norm = normalizer.normalize_act(act)
+        target_norm = normalizer.normalize_delta(target_delta)
         
-        # Coarse-to-Fine Adaptive Covariate Noise Injection
-        progress = getattr(model, "_step_counter", 0) / 10000.0
-        dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
-        obs_norm = obs_norm + torch.randn_like(obs_norm) * dynamic_noise
+        if model.training:
+            # Mirror augmentation along the batch dimension
+            obs_norm = torch.cat([obs_norm, -obs_norm], dim=0)
+            act_norm = torch.cat([act_norm, -act_norm], dim=0)
+            target_norm = torch.cat([target_norm, -target_norm], dim=0)
+            
+            # Re-index noise injection or fetch cached status
+            progress = getattr(model, "_step_counter", 0) / 10000.0
+            dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
+            obs_norm = obs_norm + torch.randn_like(obs_norm) * dynamic_noise
+            
+            # Match hidden state batch size expansions for mirrored entries
+            step_hidden = torch.cat([hidden, hidden], dim=0) if hidden is not None else None
+        else:
+            step_hidden = hidden
+            
+        pred_norm, next_hidden = model(obs_norm, act_norm, step_hidden)
         
-    pred_norm, _ = model(obs_norm, act_norm, None)
-    
-    logvar = model._current_logvar
-    if logvar is None:
-        return F.mse_loss(pred_norm, target_norm), torch.tensor(0.0, device=states.device)
+        # Split hidden state back if mirrored
+        if model.training and next_hidden is not None:
+            hidden = next_hidden[:B]
+        else:
+            hidden = next_hidden
+            
+        logvar = model._current_logvar
+        sq_error = (pred_norm - target_norm) ** 2
         
-    sq_error = (pred_norm - target_norm) ** 2
-    nll_loss = 0.5 * torch.mean(torch.exp(-logvar) * sq_error + logvar)
-    var_penalty = 0.05 * torch.mean(logvar ** 2)
-    
-    return nll_loss, var_penalty
+        if logvar is not None:
+            total_nll += 0.5 * torch.mean(torch.exp(-logvar) * sq_error + logvar)
+            total_var_penalty += 0.05 * torch.mean(logvar ** 2)
+        else:
+            total_nll += F.mse_loss(pred_norm, target_norm)
+            
+    return total_nll / T, total_var_penalty / T
 
 
 def rollout_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer, warmup_steps: int, horizon: int) -> torch.Tensor:
