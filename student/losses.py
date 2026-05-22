@@ -1,4 +1,4 @@
-"""Student loss computation with Scheduled Context Sampling and Parity Symmetry."""
+"""Student loss computation with Vectorized Likelihood and Curriculum Horizons."""
 
 from __future__ import annotations
 
@@ -8,79 +8,38 @@ from .rollout import open_loop_rollout
 
 
 def one_step_delta_loss(model, states: torch.Tensor, actions: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
-    # Extract structural tensor grid dimensions [Batch, Time, Features]
-    B, T, obs_dim = states.shape
+    obs = states[:, :-1].reshape(-1, states.shape[-1])
+    act = actions.reshape(-1, actions.shape[-1])
+    target_delta = (states[:, 1:] - states[:, :-1]).reshape(-1, states.shape[-1])
     
-    obs_seq = states[:, :-1]
-    act_seq = actions
-    target_delta_seq = states[:, 1:] - states[:, :-1]
-    
-    obs_norm_seq = normalizer.normalize_obs(obs_seq)
-    act_norm_seq = normalizer.normalize_act(act_seq)
-    target_norm_seq = normalizer.normalize_delta(target_delta_seq)
+    obs_norm = normalizer.normalize_obs(obs)
+    act_norm = normalizer.normalize_act(act)
+    target_norm = normalizer.normalize_delta(target_delta)
     
     if model.training:
         # Reflectional Parity Invariance Augmentation
-        obs_norm_mirror = -obs_norm_seq
-        act_norm_mirror = -act_norm_seq
-        target_norm_seq_mirror = -target_norm_seq
+        obs_norm_mirror = -obs_norm
+        act_norm_mirror = -act_norm
+        target_norm_mirror = -target_norm
         
-        obs_norm_seq = torch.cat([obs_norm_seq, obs_norm_mirror], dim=0)
-        act_norm_seq = torch.cat([act_norm_seq, act_norm_mirror], dim=0)
-        target_norm_seq = torch.cat([target_norm_seq, target_norm_seq_mirror], dim=0)
+        obs_norm = torch.cat([obs_norm, obs_norm_mirror], dim=0)
+        act_norm = torch.cat([act_norm, act_norm_mirror], dim=0)
+        target_norm = torch.cat([target_norm, target_norm_mirror], dim=0)
         
         # Coarse-to-Fine Adaptive Covariate Noise Injection
         progress = getattr(model, "_step_counter", 0) / 10000.0
         dynamic_noise = 0.005 + (0.020 * min(progress, 1.0))
-        obs_norm_seq = obs_norm_seq + torch.randn_like(obs_norm_seq) * dynamic_noise
+        obs_norm = obs_norm + torch.randn_like(obs_norm) * dynamic_noise
         
-    current_B = obs_norm_seq.shape[0]
-    hidden = model.initial_hidden(current_B, states.device)
+    pred_norm, _ = model(obs_norm, act_norm, None)
     
-    all_pred_norms = []
-    all_logvars = []
-    
-    # Initialize sequential tracking pointers
-    current_obs_norm = obs_norm_seq[:, 0]
-    
-    # Scheduled Autoregressive Context Sampling loop to eliminate context track drift
-    for t in range(T - 1):
-        if t > 0 and model.training and torch.rand(()).item() < 0.25:
-            # Extract last multi-step normalized forecast increment
-            pred_delta = all_pred_norms[-1]
-            
-            # Direct algebraic observation denormalization (resolves interface limitation)
-            obs_std = torch.as_tensor(normalizer.obs_std, dtype=current_obs_norm.dtype, device=current_obs_norm.device)
-            obs_mean = torch.as_tensor(normalizer.obs_mean, dtype=current_obs_norm.dtype, device=current_obs_norm.device)
-            unnorm_obs = current_obs_norm * obs_std + obs_mean
-            
-            # Official structural delta increment denormalization call
-            unnorm_delta = normalizer.denormalize_delta(pred_delta)
-            
-            # Advance spatial trajectory state vectors
-            next_obs = unnorm_obs + unnorm_delta
-            current_obs_norm = normalizer.normalize_obs(next_obs)
-        else:
-            # Retain baseline ground-truth anchoring tracks
-            current_obs_norm = obs_norm_seq[:, t]
-            
-        pred_norm, hidden = model(current_obs_norm, act_norm_seq[:, t], hidden)
-        all_pred_norms.append(pred_norm)
-        all_logvars.append(model._current_logvar)
+    logvar = model._current_logvar
+    if logvar is None:
+        return F.mse_loss(pred_norm, target_norm), torch.tensor(0.0, device=states.device)
         
-    pred_norm_total = torch.stack(all_pred_norms, dim=1).reshape(-1, obs_dim)
-    target_norm_total = target_norm_seq.reshape(-1, obs_dim)
-    logvar_total = torch.stack(all_logvars, dim=1).reshape(-1, obs_dim)
-    
-    # Adaptive Channel coordinate dimension weighting
-    sq_error = (pred_norm_total - target_norm_total) ** 2
-    with torch.no_grad():
-        error_variance = torch.mean(sq_error, dim=0, keepdim=True)
-        dim_weights = error_variance / (torch.sum(error_variance) + 1e-6)
-        dim_weights = torch.clamp(dim_weights * obs_dim, min=0.5, max=2.5)
-        
-    nll_loss = 0.5 * torch.mean(dim_weights * (torch.exp(-logvar_total) * sq_error + logvar_total))
-    var_penalty = 0.05 * torch.mean(logvar_total ** 2)
+    sq_error = (pred_norm - target_norm) ** 2
+    nll_loss = 0.5 * torch.mean(torch.exp(-logvar) * sq_error + logvar)
+    var_penalty = 0.05 * torch.mean(logvar ** 2)
     
     return nll_loss, var_penalty
 
@@ -137,12 +96,9 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
         for param_group in model._optimizer_ref.param_groups:
             param_group['lr'] = cosine_lr
 
-    # Dynamic BPTT curriculum unroll mapping over max available timeline contexts
-    seq_len = int(training_cfg.get("train_sequence_length", 96))
-    warmup = int(eval_cfg.get("warmup_steps", 10))
+    # Dynamic BPTT curriculum unroll window calibrated to optimize past the 25-step plateau
     base_horizon = int(loss_cfg.get("rollout_train_horizon", 15))
-    
-    max_horizon = seq_len - warmup - 2
+    max_horizon = 35  # Clean sweet spot preventing long-horizon gradient washing
     progress = current_step / total_updates
     current_horizon = int(base_horizon + math.floor(progress * (max_horizon - base_horizon)))
     
@@ -150,6 +106,8 @@ def compute_loss(model, batch: dict[str, torch.Tensor], normalizer, cfg: dict):
     actions = batch["actions"]
     
     one_step_nll, var_penalty = one_step_delta_loss(model, states, actions, normalizer)
+    
+    warmup = int(eval_cfg.get("warmup_steps", 10))
     roll = rollout_loss(model, states, actions, normalizer, warmup_steps=warmup, horizon=current_horizon)
     
     total = float(loss_cfg.get("one_step_weight", 1.0)) * (one_step_nll + var_penalty) + float(loss_cfg.get("rollout_weight", 1.0)) * roll

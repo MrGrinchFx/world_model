@@ -44,7 +44,7 @@ class StudentWorldModel(nn.Module):
         hidden_dim: int = 256,
         num_layers: int = 3,
         use_gru: bool = True,
-        delta_limit: float = 8.0,  # Retains maximum precision headroom for clean predictions
+        delta_limit: float = 8.0,
     ):
         super().__init__()
         self.use_gru = bool(use_gru)
@@ -54,10 +54,10 @@ class StudentWorldModel(nn.Module):
         layers: list[nn.Module] = []
         for i in range(int(num_layers)):
             if i == 0:
-                # Unconstrained input layer fully registers sudden state-action variations
+                # Unconstrained input layer fully registers wide state-action variations
                 layers += [nn.Linear(in_dim, hidden_dim)]
             else:
-                # Spectrally normalized hidden layers enforce smooth continuous extrapolation
+                # Spectrally normalized layers ensure long-horizon continuous extrapolation
                 layers += [spectral_norm(nn.Linear(in_dim, hidden_dim))]
             layers += [nn.LayerNorm(hidden_dim), nn.SiLU()]
             in_dim = hidden_dim
@@ -72,13 +72,12 @@ class StudentWorldModel(nn.Module):
         self.kinematic_shortcut = nn.Linear(obs_dim + act_dim, obs_dim)
         self._current_logvar: torch.Tensor | None = None
 
-    def initial_hidden(self, batch_size: int, device: torch.device):
-        if not self.use_gru or self.gru is None:
-            return None
-        return torch.zeros(batch_size, self.gru.hidden_size, device=device)
-
     def forward(self, obs_norm: torch.Tensor, act_norm: torch.Tensor, hidden=None):
-        raw_state_action = torch.cat([obs_norm, act_norm], dim=-1)
+        # ADVANCED OOD FIX: Input Feature Squashing bounds explosive out-of-distribution values safely
+        obs_norm_scaled = 3.0 * torch.tanh(obs_norm / 3.0)
+        act_norm_scaled = 3.0 * torch.tanh(act_norm / 3.0)
+        
+        raw_state_action = torch.cat([obs_norm_scaled, act_norm_scaled], dim=-1)
         baseline_delta = self.kinematic_shortcut(raw_state_action)
         
         feat = self.encoder(raw_state_action)
@@ -89,13 +88,10 @@ class StudentWorldModel(nn.Module):
             hidden = self.gru(feat, hidden)
             feat = hidden
             
-        head_input = torch.cat([feat, obs_norm, act_norm], dim=-1)
+        head_input = torch.cat([feat, obs_norm_scaled, act_norm_scaled], dim=-1)
         
-        # Extract raw non-linear updates
         non_linear_residual = self.mu_head(head_input)
-        
-        # Elastic Residual Gate: clips anomalous updates under extreme OOD inputs,
-        # forcing safe reliance on the kinematic baseline shortcut.
+        # Elastic Residual Gate handles sudden action shocks cleanly
         non_linear_residual = torch.tanh(non_linear_residual / 4.0) * 4.0
         
         raw_mu = baseline_delta + 0.1 * non_linear_residual
